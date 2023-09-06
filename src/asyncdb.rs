@@ -3,9 +3,8 @@ use std::path::Path;
 
 use crate::{Options, Result, Status, StatusCode, WriteBatch, DB};
 
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
-use tokio::task::{spawn_blocking, JoinHandle};
+use async_std::channel::{bounded, Receiver, Sender};
+use async_std::task::{JoinHandle, spawn_blocking};
 
 const CHANNEL_BUFFER_SIZE: usize = 32;
 
@@ -37,7 +36,7 @@ enum Response {
 /// Contains both a request and a back-channel for the reply.
 struct Message {
     req: Request,
-    resp_channel: oneshot::Sender<Response>,
+    resp_channel: async_oneshot::Sender<Response>,
 }
 
 /// `AsyncDB` makes it easy to use LevelDB in a tokio runtime.
@@ -47,14 +46,14 @@ struct Message {
 /// mechanism as well as the channel types.
 pub struct AsyncDB {
     jh: JoinHandle<()>,
-    send: mpsc::Sender<Message>,
+    send: Sender<Message>,
 }
 
 impl AsyncDB {
     /// Create a new or open an existing database.
     pub fn new<P: AsRef<Path>>(name: P, opts: Options) -> Result<AsyncDB> {
         let db = DB::open(name, opts)?;
-        let (send, recv) = mpsc::channel(CHANNEL_BUFFER_SIZE);
+        let (send, recv) = bounded(CHANNEL_BUFFER_SIZE);
         let jh = spawn_blocking(move || AsyncDB::run_server(db, recv));
         Ok(AsyncDB { jh, send })
     }
@@ -178,7 +177,7 @@ impl AsyncDB {
     }
 
     async fn process_request(&self, req: Request) -> Result<Response> {
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = async_oneshot::oneshot();
         let m = Message {
             req,
             resp_channel: tx,
@@ -191,19 +190,19 @@ impl AsyncDB {
         }
         let resp = rx.await;
         match resp {
-            Err(e) => Err(Status {
+            Err(_) => Err(Status {
                 code: StatusCode::AsyncError,
-                err: e.to_string(),
+                err: "channel closed".into(),
             }),
             Ok(r) => Ok(r),
         }
     }
 
-    fn run_server(mut db: DB, mut recv: mpsc::Receiver<Message>) {
+    fn run_server(mut db: DB, recv: Receiver<Message>) {
         let mut snapshots = HashMap::new();
         let mut snapshot_counter: usize = 0;
 
-        while let Some(message) = recv.blocking_recv() {
+        while let Ok(mut message) = recv.recv_blocking() {
             match message.req {
                 Request::Close => {
                     message.resp_channel.send(Response::OK).ok();
@@ -271,7 +270,7 @@ impl AsyncDB {
     }
 }
 
-fn send_response(ch: oneshot::Sender<Response>, result: Result<()>) {
+fn send_response(mut ch: async_oneshot::Sender<Response>, result: Result<()>) {
     if let Err(e) = result {
         ch.send(Response::Error(e)).ok();
     } else {
