@@ -37,7 +37,7 @@ extern crate time_test;
 #[macro_use]
 mod infolog;
 
-#[cfg(feature = "async")]
+#[cfg(any(feature = "async_std", feature = "async_tokio"))]
 mod asyncdb;
 
 mod block;

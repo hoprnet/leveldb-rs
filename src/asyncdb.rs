@@ -3,10 +3,48 @@ use std::path::Path;
 
 use crate::{Options, Result, Status, StatusCode, WriteBatch, DB};
 
+#[cfg(feature = "async_std")]
 use async_std::channel::{bounded, Receiver, Sender};
+#[cfg(feature = "async_std")]
 use async_std::task::{JoinHandle, spawn_blocking};
 
+#[cfg(feature = "async_std")]
+type OneshotSender<T> = async_oneshot::Sender<T>;
+#[cfg(feature = "async_std")]
+type OneshotReceiver<T> = async_oneshot::Receiver<T>;
+
+#[cfg(feature = "async_std")]
+fn bounded_channel<T>(size: usize) -> (Sender<T>, Receiver<T>) {
+    bounded(size)
+}
+
+#[cfg(feature = "async_std")]
+fn oneshot<T>() -> (OneshotSender<T>, OneshotReceiver<T>) {
+    async_oneshot::oneshot()
+}
+
+#[cfg(feature = "async_tokio")]
+use tokio::sync::{oneshot, mpsc, mpsc::Receiver, mpsc::Sender};
+#[cfg(feature = "async_tokio")]
+use tokio::task::{spawn_blocking, JoinHandle};
+
+#[cfg(feature = "async_tokio")]
+type OneshotSender<T> = oneshot::Sender<T>;
+#[cfg(feature = "async_tokio")]
+type OneshotReceiver<T> = oneshot::Receiver<T>;
+
+#[cfg(feature = "async_tokio")]
+fn bounded_channel<T>(size: usize) -> (Sender<T>, Receiver<T>) {
+    mpsc::channel(size)
+}
+
+#[cfg(feature = "async_tokio")]
+fn oneshot<T>() -> (OneshotSender<T>, OneshotReceiver<T>) {
+    oneshot::channel()
+}
+
 const CHANNEL_BUFFER_SIZE: usize = 32;
+
 
 #[derive(Clone, Copy)]
 pub struct SnapshotRef(usize);
@@ -36,7 +74,7 @@ enum Response {
 /// Contains both a request and a back-channel for the reply.
 struct Message {
     req: Request,
-    resp_channel: async_oneshot::Sender<Response>,
+    resp_channel: OneshotSender<Response>,
 }
 
 /// `AsyncDB` makes it easy to use LevelDB in a tokio runtime.
@@ -53,7 +91,7 @@ impl AsyncDB {
     /// Create a new or open an existing database.
     pub fn new<P: AsRef<Path>>(name: P, opts: Options) -> Result<AsyncDB> {
         let db = DB::open(name, opts)?;
-        let (send, recv) = bounded(CHANNEL_BUFFER_SIZE);
+        let (send, recv) = bounded_channel(CHANNEL_BUFFER_SIZE);
         let jh = spawn_blocking(move || AsyncDB::run_server(db, recv));
         Ok(AsyncDB { jh, send })
     }
@@ -177,7 +215,7 @@ impl AsyncDB {
     }
 
     async fn process_request(&self, req: Request) -> Result<Response> {
-        let (tx, rx) = async_oneshot::oneshot();
+        let (tx, rx) = oneshot();
         let m = Message {
             req,
             resp_channel: tx,
@@ -198,11 +236,21 @@ impl AsyncDB {
         }
     }
 
-    fn run_server(mut db: DB, recv: Receiver<Message>) {
+    #[cfg(feature = "async_tokio")]
+    fn blocking_recv(recv: &mut Receiver<Message>) -> Option<Message> {
+        recv.blocking_recv()
+    }
+
+    #[cfg(feature = "async_std")]
+    fn blocking_recv(recv: &mut Receiver<Message>) -> Option<Message> {
+        recv.recv_blocking().ok()
+    }
+
+    fn run_server(mut db: DB, mut recv: Receiver<Message>) {
         let mut snapshots = HashMap::new();
         let mut snapshot_counter: usize = 0;
 
-        while let Ok(mut message) = recv.recv_blocking() {
+        while let Some(mut message) = Self::blocking_recv(&mut recv) {
             match message.req {
                 Request::Close => {
                     message.resp_channel.send(Response::OK).ok();
@@ -270,7 +318,7 @@ impl AsyncDB {
     }
 }
 
-fn send_response(mut ch: async_oneshot::Sender<Response>, result: Result<()>) {
+fn send_response(mut ch: OneshotSender<Response>, result: Result<()>) {
     if let Err(e) = result {
         ch.send(Response::Error(e)).ok();
     } else {

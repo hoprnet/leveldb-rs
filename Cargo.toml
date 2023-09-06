@@ -22,10 +22,12 @@ fs2 = "0.4.3"
 
 async-std = { optional = true, version = "1.12.0" }
 async-oneshot = { optional = true, version = "0.5.0" }
+tokio = { optional = true, features = ["rt", "sync"], version = ">= 1.21" }
 
 [features]
-default = ["async"]
-async = ["async-std", "async-oneshot"]
+default = []
+async_std = ["async-std", "async-oneshot"]
+async_tokio = ["tokio"]
 
 [dev-dependencies]
 time-test = "0.2"

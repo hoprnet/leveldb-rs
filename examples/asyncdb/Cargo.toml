@@ -7,4 +7,4 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.21", features = ["rt", "macros" ] }
-rusty-leveldb = { path = "../../", features = ["async"] }
+rusty-leveldb = { path = "../../", features = ["async_tokio"] }
