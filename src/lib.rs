@@ -75,7 +75,7 @@ mod db_iter;
 
 pub mod compressor;
 
-#[cfg(feature = "async")]
+#[cfg(any(feature = "async_std", feature = "async_tokio"))]
 pub use asyncdb::AsyncDB;
 
 pub use cmp::{Cmp, DefaultCmp};
